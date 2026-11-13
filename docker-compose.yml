@@ -5,3 +5,10 @@ services:
     ports:
       - "5000:5000"
     restart: unless-stopped
+    environment:
+      - HANDOVER_DB=/data/handovers.db
+    volumes:
+      - handover-data:/data
+
+volumes:
+  handover-data:

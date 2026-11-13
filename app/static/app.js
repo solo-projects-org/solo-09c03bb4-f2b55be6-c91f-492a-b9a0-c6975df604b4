@@ -7,8 +7,10 @@ const state = {
   tableIndex: 0,
   mapping: { road: 1, direction: 2, start: 3, end: 4 },
   skipHeader: true,
-  rows: [],          // 每行: { road, direction, start: TimeField, end: TimeField }
-  origins: { start: {}, end: {} }, // field -> originId -> { text, rowIndexes: number[] }
+  rows: [],          // 每行: { gridRow, road, direction, start, end, cells }
+  origins: { start: {}, end: {} }, // field -> originId -> { originalText, text, rowIndexes }
+  lastHandover: null,
+  lookup: null,
 };
 
 const FIELD_LABELS = { road: "路段", direction: "方向", start: "开始", end: "结束" };
@@ -62,6 +64,7 @@ function parseDateTime(text) {
 }
 
 function effectiveValue(row, field) {
+  if (field === "road" || field === "direction") return row[field];
   const f = row[field];
   return f.override !== null ? f.override : state.origins[field][f.originId].text;
 }
@@ -171,10 +174,15 @@ function buildEditor() {
     }
 
     const row = {
+      gridRow: r,
       road: roadCell?.text || "",
       direction: dirCell?.text || "",
-      start: makeTimeField(startCell, "start", r),
-      end: makeTimeField(endCell, "end", r),
+      cells: {
+        road: sourceMeta(roadCell),
+        direction: sourceMeta(dirCell),
+      },
+      start: makeTimeField(startCell, "start"),
+      end: makeTimeField(endCell, "end"),
     };
     state.rows.push(row);
   });
@@ -182,13 +190,44 @@ function buildEditor() {
   renderEditor();
 }
 
-function makeTimeField(cell, field, _gridRow) {
-  const id = cell.id;
+function sourceMeta(cell) {
+  if (!cell) return { originalText: "", originId: "", originRow: null, originCol: null, covered: false };
+  return {
+    originalText: cell.text,
+    originId: cell.id,
+    originRow: cell.originRow,
+    originCol: cell.originCol,
+    covered: cell.covered,
+  };
+}
+
+function makeTimeField(cell, field) {
+  const meta = sourceMeta(cell);
+  const id = meta.originId;
   if (!state.origins[field][id]) {
-    state.origins[field][id] = { text: cell.text, rowIndexes: [] };
+    state.origins[field][id] = { originalText: meta.originalText, text: meta.originalText, rowIndexes: [] };
   }
   state.origins[field][id].rowIndexes.push(state.rows.length);
-  return { originId: id, override: null };
+  return {
+    originId: id,
+    originRow: meta.originRow,
+    originCol: meta.originCol,
+    covered: meta.covered,
+    override: null,
+  };
+}
+
+/* ---------- 取值来源 ---------- */
+
+function textSource(row, field) {
+  return row[field] === row.cells[field].originalText ? "original" : "edited";
+}
+
+function timeSource(row, field) {
+  const f = row[field];
+  if (f.override !== null) return "override";
+  return state.origins[field][f.originId].text === state.origins[field][f.originId].originalText
+    ? "original" : "shared_edit";
 }
 
 /* ---------- 编辑区渲染 ---------- */
@@ -243,6 +282,9 @@ function timeCellHtml(row, rowIndex, field, errorMsg) {
          data-row="${rowIndex}" data-timefield="${field}">单独覆盖此行</button>`;
   const badge = isOverride ? ""
     : `<span class="shared-badge">原格共用 ${origin.rowIndexes.length} 行</span>`;
+  const originNote = origin.originalText !== origin.text
+    ? `<div class="origin-note">原格原文：${escapeHtml(origin.originalText) || "（空）"}（已编辑）</div>`
+    : `<div class="origin-note">原格原文即当前值</div>`;
   const note = isOverride
     ? `<div class="origin-note">覆盖中；原格当前值：${escapeHtml(origin.text) || "（空）"}</div>`
     : `<div class="origin-note">编辑此框将更新原格共用时间，仅作用于未覆盖的 ${origin.rowIndexes.length} 行</div>`;
@@ -252,7 +294,7 @@ function timeCellHtml(row, rowIndex, field, errorMsg) {
     <input class="${cls}" data-row="${rowIndex}" data-timefield="${field}"
            value="${escapeHtml(value)}" placeholder="例如 2026-11-15 22:00">
     <div class="cell-actions">${actionBtn}${badge}</div>
-    ${note}${errHtml}`;
+    ${originNote}${note}${errHtml}`;
 }
 
 function fieldError(row, field) {
@@ -344,24 +386,44 @@ $("#editor-table").addEventListener("click", (ev) => {
 
 /* ---------- 导出 ---------- */
 
+function buildRowPayloads() {
+  return state.rows.map((row) => ({
+    road: row.road,
+    direction: row.direction,
+    start: effectiveValue(row, "start"),
+    end: effectiveValue(row, "end"),
+  }));
+}
+
+async function downloadCsv(url, filename) {
+  const resp = await fetch(url, { cache: "no-store" });
+  if (!resp.ok) {
+    const data = await resp.json().catch(() => ({}));
+    throw new Error(data.error || `下载失败（${resp.status}）`);
+  }
+  const disposition = resp.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const blob = await resp.blob();
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objUrl;
+  a.download = match ? match[1] : filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+}
+
 $("#export-btn").addEventListener("click", async () => {
   if (collectErrors().length) {
     renderValidationSummary();
     return;
   }
-  const payload = {
-    rows: state.rows.map((row) => ({
-      road: row.road,
-      direction: row.direction,
-      start: effectiveValue(row, "start"),
-      end: effectiveValue(row, "end"),
-    })),
-  };
 
   const resp = await fetch("/api/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ rows: buildRowPayloads() }),
   });
 
   if (resp.ok) {
@@ -386,6 +448,196 @@ $("#export-btn").addEventListener("click", async () => {
     $("#validate-status").textContent = `导出失败：${data.error || resp.status}`;
     $("#validate-status").className = "error-text";
   }
+});
+
+/* ---------- 交接下载：存档后才下载 ---------- */
+
+function buildProvenanceCell(row, field) {
+  if (field === "road" || field === "direction") {
+    const meta = row.cells[field];
+    return {
+      value: row[field],
+      originalText: meta.originalText,
+      originId: meta.originId,
+      originRow: meta.originRow,
+      originCol: meta.originCol,
+      covered: meta.covered,
+      source: textSource(row, field),
+    };
+  }
+  const f = row[field];
+  const origin = state.origins[field][f.originId];
+  return {
+    value: effectiveValue(row, field),
+    originalText: origin.originalText,
+    originId: f.originId,
+    originRow: f.originRow,
+    originCol: f.originCol,
+    covered: f.covered,
+    source: timeSource(row, field),
+  };
+}
+
+function buildHandoverPayload() {
+  return {
+    fileName: state.fileName,
+    tableIndex: state.tableIndex,
+    tableNo: state.tableIndex + 1,
+    skipHeader: state.skipHeader,
+    mapping: { ...state.mapping },
+    rows: state.rows.map((row) => ({
+      gridRow: row.gridRow,
+      cells: {
+        road: buildProvenanceCell(row, "road"),
+        direction: buildProvenanceCell(row, "direction"),
+        start: buildProvenanceCell(row, "start"),
+        end: buildProvenanceCell(row, "end"),
+      },
+    })),
+  };
+}
+
+function showHandoverResult(info) {
+  const el = $("#handover-result");
+  el.hidden = false;
+  el.innerHTML = `
+    <p class="handover-ok">已存档，生成唯一批号：<strong>${escapeHtml(info.batchNo)}</strong></p>
+    <p class="muted">公告：${escapeHtml(info.noticeFileName)} ｜ 表 ${escapeHtml(info.tableNo)} ｜
+      ${escapeHtml(info.rowCount)} 条数据 ｜ 文件：<code>${escapeHtml(info.csvFileName)}</code></p>
+    <p class="muted">若退回，凭此批号 + 数据行号 + 字段名回查原格；也可随时按批号重下原文件。</p>
+    <a class="btn btn-primary" id="handover-download-link"
+       href="${escapeHtml(info.downloadUrl)}"
+       download="${escapeHtml(info.csvFileName)}">下载交接文件 ${escapeHtml(info.csvFileName)}</a>`;
+}
+
+$("#handover-btn").addEventListener("click", async () => {
+  if (collectErrors().length) {
+    renderValidationSummary();
+    $("#handover-result").hidden = false;
+    $("#handover-result").innerHTML = '<p class="error-text">存在错误行，已阻止交接。</p>';
+    return;
+  }
+
+  $("#handover-result").hidden = false;
+  $("#handover-result").innerHTML = '<p class="muted">正在存档交接文件……</p>';
+  try {
+    const resp = await fetch("/api/handover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildHandoverPayload()),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      if (resp.status === 422 && data.errors) {
+        renderEditor();
+        $("#handover-result").innerHTML =
+          `<p class="error-text">后端校验拦截：${data.errors.map((e) => `第${e.row + 1}行`).join("、")}，已阻止交接。</p>`;
+      } else {
+        $("#handover-result").innerHTML =
+          `<p class="error-text">交接失败：${escapeHtml(data.error || resp.status)}</p>`;
+      }
+      return;
+    }
+    state.lastHandover = data;
+    showHandoverResult(data);
+    // 存档事务已提交，这时才触发实际下载
+    await downloadCsv(data.downloadUrl, data.csvFileName);
+  } catch (err) {
+    $("#handover-result").innerHTML =
+      `<p class="error-text">交接失败：${escapeHtml(err.message)}</p>`;
+  }
+});
+
+/* ---------- 交接回查 ---------- */
+
+function sourceTag(cell) {
+  const cls = cell.source === "original" ? "tag-origin"
+    : cell.source === "override" ? "tag-override" : "tag-edited";
+  return `<span class="tag ${cls}">${escapeHtml(cell.sourceLabel)}</span>`;
+}
+
+function renderLookup(data) {
+  const batch = data.batch;
+  const head = `
+    <div class="lookup-batch">
+      <p><strong>批号 ${escapeHtml(batch.batchNo)}</strong>
+         <span class="muted">存档时间 ${escapeHtml(batch.createdAt)}</span></p>
+      <p class="muted">公告文件：<strong>${escapeHtml(batch.noticeFileName)}</strong> ｜
+         表号：<strong>表 ${escapeHtml(batch.tableNo)}</strong> ｜
+         数据行数：${escapeHtml(batch.rowCount)} ｜
+         文件：<code>${escapeHtml(batch.csvFileName)}</code> ｜
+         存档 SHA-256：<code>${escapeHtml(batch.sha256)}</code></p>
+      <a class="btn" href="${escapeHtml(batch.downloadUrl)}"
+         download="${escapeHtml(batch.csvFileName)}">按批号重下原交接文件</a>
+    </div>`;
+
+  if (!data.cells.length) {
+    $("#lookup-result").innerHTML = head +
+      '<p class="muted">该批号已找到。填写数据行号与字段名可定位到具体原格。</p>';
+    return;
+  }
+
+  const rows = data.cells.map((cell) => `
+    <tr>
+      <td>${cell.rowNo}</td>
+      <td>${escapeHtml(cell.fieldLabel)}</td>
+      <td>第 ${cell.originRowLabel} 行 / 第 ${cell.originColLabel} 列
+          ${cell.covered ? '<div class="muted">合并格覆盖，指向原格</div>' : ""}</td>
+      <td class="original-text">${escapeHtml(cell.originalText) || "（空）"}</td>
+      <td class="delivered-value">${escapeHtml(cell.value) || "（空）"}</td>
+      <td>${sourceTag(cell)}<div class="muted">${escapeHtml(cell.sourceDescription)}</div></td>
+    </tr>`).join("");
+
+  $("#lookup-result").innerHTML = head + `
+    <div class="table-wrap">
+      <table id="lookup-table">
+        <thead><tr>
+          <th>数据行号</th><th>字段</th><th>公告原格（表 ${escapeHtml(batch.tableNo)}）</th>
+          <th>未编辑原文</th><th>实际交付值</th><th>取值来源</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+async function runLookup() {
+  const batchNo = $("#lookup-batch").value.trim();
+  const rowNo = $("#lookup-row").value.trim();
+  const field = $("#lookup-field").value;
+  $("#lookup-error").hidden = true;
+  $("#lookup-result").innerHTML = "";
+
+  if (!batchNo) {
+    $("#lookup-error").textContent = "请输入批号";
+    $("#lookup-error").hidden = false;
+    return;
+  }
+  if (rowNo && (!Number.isInteger(Number(rowNo)) || Number(rowNo) < 1)) {
+    $("#lookup-error").textContent = "数据行号必须是不小于 1 的整数（首条数据为第 1 行）";
+    $("#lookup-error").hidden = false;
+    return;
+  }
+
+  const params = new URLSearchParams();
+  if (rowNo) params.set("row", rowNo);
+  if (field) params.set("field", field);
+  const qs = params.toString();
+
+  try {
+    const resp = await fetch(`/api/handover/${encodeURIComponent(batchNo)}${qs ? `?${qs}` : ""}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `回查失败（${resp.status}）`);
+    state.lookup = data;
+    renderLookup(data);
+  } catch (err) {
+    $("#lookup-error").textContent = err.message;
+    $("#lookup-error").hidden = false;
+  }
+}
+
+$("#lookup-btn").addEventListener("click", runLookup);
+$("#lookup-batch").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") runLookup();
 });
 
 /* ---------- 来源与映射事件 ---------- */
