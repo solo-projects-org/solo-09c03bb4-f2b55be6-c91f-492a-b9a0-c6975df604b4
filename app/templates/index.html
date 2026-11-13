@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>道路施工管制时段采录</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>道路施工管制时段采录</h1>
+    <p class="subtitle">上传施工公告 HTML，选择表格后采录路段、方向、开始、结束四列；支持跨行合并格的共用时间编辑与逐行单独覆盖。</p>
+  </header>
+
+  <main>
+    <section class="card" id="source-card">
+      <h2>1. 数据来源</h2>
+      <div class="row">
+        <label class="file-btn">
+          上传公告 HTML
+          <input type="file" id="file-input" accept=".html,.htm,text/html" hidden>
+        </label>
+        <button type="button" id="sample-btn" class="btn">载入带合并格的公告样例</button>
+        <span id="source-name" class="muted"></span>
+      </div>
+      <p id="source-error" class="error-text" hidden></p>
+    </section>
+
+    <section class="card" id="mapping-card" hidden>
+      <h2>2. 选择表格与列映射</h2>
+      <div class="row">
+        <label>公告表格
+          <select id="table-select"></select>
+        </label>
+        <label><input type="checkbox" id="skip-header" checked> 跳过表头行（所选列均为 th 的行）</label>
+      </div>
+      <div class="row mapping-row">
+        <label>路段列 <select id="map-road" class="col-select"></select></label>
+        <label>方向列 <select id="map-direction" class="col-select"></select></label>
+        <label>开始列 <select id="map-start" class="col-select"></select></label>
+        <label>结束列 <select id="map-end" class="col-select"></select></label>
+      </div>
+      <div class="table-wrap">
+        <table id="preview-table"></table>
+      </div>
+      <p class="muted">预览中深色格为合并格的覆盖区域；被覆盖格与原格共用同一时间。</p>
+    </section>
+
+    <section class="card" id="editor-card" hidden>
+      <h2>3. 采录与编辑</h2>
+      <div class="legend">
+        <span class="tag tag-origin">原格共用时间</span>
+        <span class="tag tag-override">单行覆盖时间</span>
+        <span class="tag tag-err">时间错误</span>
+        <span class="muted">修改原格时间只影响仍共用该时间的行；已单独覆盖的行不受影响，撤销覆盖后重新取原格最新值。</span>
+      </div>
+      <div class="table-wrap">
+        <table id="editor-table"></table>
+      </div>
+      <div class="row editor-footer">
+        <span id="validate-status" class="muted"></span>
+        <button type="button" id="export-btn" class="btn btn-primary">导出 CSV</button>
+      </div>
+      <ul id="error-list" class="error-text" hidden></ul>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

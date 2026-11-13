@@ -1,0 +1,7 @@
+services:
+  transit-notice:
+    build: ./app
+    container_name: transit-notice
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
